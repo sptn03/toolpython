@@ -8,7 +8,7 @@ def get_db_connection():
         host="localhost",
         user="root", 
         password="",
-        database="provinte_new"  # Tên database của bạn
+        database="provinte"  # Tên database của bạn
     )
 
 def write_log(message):
@@ -173,11 +173,19 @@ def update_wards(district_id, district_name, wards_data):
     write_log(f"\n------> CẬP NHẬT PHƯỜNG/XÃ CỦA {district_name}")
     
     # Lấy danh sách phường/xã hiện có và các ID đã sử dụng
-    cursor.execute("SELECT id, name FROM ward")
-    existing_wards = {normalize_name(name): id for id, name in cursor}
-    used_ids = {row[0] for row in cursor}
+    cursor.execute("SELECT id, name, district_id FROM ward")
+    existing_wards = {}
+    used_ids = set()
+    updated_ids = set()  # Thêm set để theo dõi các ID đã được cập nhật
     
-    # Đặt tất cả active = 0
+    for ward_id, name, ward_district_id in cursor:
+        normalized_name = normalize_name(name)
+        if normalized_name not in existing_wards:
+            existing_wards[normalized_name] = []
+        existing_wards[normalized_name].append((ward_id, ward_district_id))
+        used_ids.add(ward_id)
+    
+    # Đặt tất cả active = 0 cho district hiện tại
     cursor.execute("UPDATE ward SET active = 0 WHERE district_id = %s", (district_id,))
     
     # Thống kê
@@ -193,48 +201,75 @@ def update_wards(district_id, district_name, wards_data):
         write_log(f"\n--------> Đang xử lý phường/xã: {name} (Mã: {code})")
         
         if normalized_name in existing_wards:
-            cursor.execute("""
-                UPDATE ward 
-                SET active = 1, updated_at = %s
-                WHERE id = %s
-            """, (datetime.now(), existing_wards[normalized_name]))
-            updated_count += 1
-            write_log(f"---------> Cập nhật active = 1")
+            # Kiểm tra xem có ward nào thuộc district_id hiện tại không
+            ward_found = False
+            for ward_id, ward_district_id in existing_wards[normalized_name]:
+                if ward_district_id == district_id and ward_id not in updated_ids:
+                    cursor.execute("""
+                        UPDATE ward 
+                        SET active = 1, updated_at = %s
+                        WHERE id = %s AND district_id = %s
+                    """, (datetime.now(), ward_id, district_id))
+                    updated_count += 1
+                    ward_found = True
+                    updated_ids.add(ward_id)  # Đánh dấu ID đã được cập nhật
+                    write_log(f"---------> Cập nhật active = 1 cho ward_id: {ward_id}")
+                    break
+            
+            # Nếu không tìm thấy ward trong district hiện tại hoặc đã được cập nhật, thêm mới
+            if not ward_found:
+                not_found_count += 1
+                not_found_list.append(name)
+                write_log(f"---------> Không tìm thấy trong district hiện tại hoặc đã được cập nhật")
+                
+                # Tạo ID mới và kiểm tra cho đến khi không trùng
+                new_id = code
+                write_log(f"---------> Thử ID: {new_id}")
+                
+                # Kiểm tra xem ID đã tồn tại hoặc đã được sử dụng chưa
+                if new_id in used_ids or new_id in updated_ids:
+                    new_id = f"{code}111"
+                    write_log(f"---------> ID đã tồn tại, thử ID mới: {new_id}")
+                    
+                    # Kiểm tra lại ID mới
+                    while new_id in used_ids or new_id in updated_ids:
+                        suffix = int(new_id[-3:]) + 1
+                        new_id = f"{code}{suffix}"
+                        write_log(f"---------> Thử ID mới: {new_id}")
+                
+                used_ids.add(new_id)
+                updated_ids.add(new_id)  # Đánh dấu ID mới đã được sử dụng
+                
+                # Thêm mới xã với ID mới
+                cursor.execute("""
+                    INSERT INTO ward (id, district_id, name, active, updated_at)
+                    VALUES (%s, %s, %s, 1, %s)
+                """, (new_id, district_id, name, datetime.now()))
+                write_log(f"---------> Đã thêm mới phường/xã với ID: {new_id}")
+                conn.commit()
         else:
             not_found_count += 1
             not_found_list.append(name)
             write_log(f"---------> Không tìm thấy trong DB")
             
-            # Tạo ID mới và kiểm tra cho đến khi không trùng
+            # Tạo ID mới cho ward mới
             new_id = code
-            write_log(f"---------> Thử ID: {new_id}")
-            
-            # Kiểm tra xem ID đã tồn tại chưa
-            cursor.execute("SELECT 1 FROM ward WHERE id = %s", (new_id,))
-            if cursor.fetchone():
+            if new_id in used_ids or new_id in updated_ids:
                 new_id = f"{code}111"
-                write_log(f"---------> ID đã tồn tại, thử ID mới: {new_id}")
-                
-                # Kiểm tra lại ID mới
-                cursor.execute("SELECT 1 FROM ward WHERE id = %s", (new_id,))
-                if cursor.fetchone():
-                    suffix = 112
-                    while True:
-                        test_id = f"{code}{suffix}"
-                        cursor.execute("SELECT 1 FROM ward WHERE id = %s", (test_id,))
-                        if not cursor.fetchone():
-                            new_id = test_id
-                            write_log(f"---------> Tìm thấy ID khả dụng: {new_id}")
-                            break
-                        suffix += 1
+                while new_id in used_ids or new_id in updated_ids:
+                    suffix = int(new_id[-3:]) + 1
+                    new_id = f"{code}{suffix}"
             
-            # Thêm mới xã với ID mới
+            used_ids.add(new_id)
+            updated_ids.add(new_id)  # Đánh dấu ID mới đã được sử dụng
+            
+            # Thêm mới xã
             cursor.execute("""
                 INSERT INTO ward (id, district_id, name, active, updated_at)
                 VALUES (%s, %s, %s, 1, %s)
             """, (new_id, district_id, name, datetime.now()))
             write_log(f"---------> Đã thêm mới phường/xã với ID: {new_id}")
-            conn.commit()  # Commit ngay sau khi thêm mới
+            conn.commit()
     
     # Thống kê kết quả
     write_log(f"\n------> THỐNG KÊ CẬP NHẬT PHƯỜNG/XÃ CỦA {district_name}")
